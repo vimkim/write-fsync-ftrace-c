@@ -1,0 +1,8 @@
+# tracer: function_graph
+#
+# CPU  DURATION                  FUNCTION CALLS
+# |     |   |                     |   |   |   |
+  1)               |  __x64_sys_fsync() {
+  1)               |    vfs_fsync_range() {
+  5) * 17318.74 us |    } /* vfs_fsync_range */
+  5) * 17322.31 us |  } /* __x64_sys_fsync */
