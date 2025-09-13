@@ -1,90 +1,78 @@
-# fsync-vs-write Demo
+# write-fsync-ftrace (Linux ftrace demo)
 
-This is a tiny project to demonstrate the difference between:
+This repo demonstrates a simple but important observation with ftrace: if a program does not call `fsync(2)`, the syscall trace does not show any fsync activity; if it calls `fsync(2)`, the trace clearly captures the fsync path.
 
-1. Writing data to a file and closing it (`write_only.c`)
-2. Writing data and explicitly calling `fsync()` before closing (`write_fsync.c`)
+There are two tiny programs:
+- `write_only.c` — writes 16 MiB and closes (no `fsync`).
+- `write_fsync.c` — writes 16 MiB and then calls `fsync(fd)` before close.
 
-The goal is to show, with tracing tools like **ftrace**, that `fsync()` travels deeper into the kernel: through the VFS layer, the filesystem’s `->fsync` implementation, and eventually into the block layer to issue flushes. In contrast, a plain `write()` followed by `close()` does not guarantee immediate durability.
+Traces are captured using the kernel ftrace interface under `/sys/kernel/debug/tracing`.
+
+---
+
+## Requirements
+
+- Linux with ftrace/tracefs available (`/sys/kernel/debug/tracing`).
+- `sudo` privileges to toggle tracing and read the trace buffer.
+- `gcc` to build the test binaries.
 
 ---
 
 ## Build
 
-```bash
-gcc -O2 -Wall -o write_only write_only.c
-gcc -O2 -Wall -o write_fsync write_fsync.c
-```
+- With `just` (recommended): `just build`
+- Or manually:
+  - `gcc -O2 -Wall -o write_only write_only.c`
+  - `gcc -O2 -Wall -o write_fsync write_fsync.c`
 
 ---
 
-## Usage
+## Capture Traces (via justfile)
 
-```bash
-./write_only   /path/to/output.bin
-./write_fsync  /path/to/output.bin
-```
+- `just trace-write_only`
+  - Clears the trace buffer, starts tracing, runs `./write_only write_only.txt`, stops tracing.
+  - Saves output to `./trace_write_only.txt`.
 
-Each program writes 16 MiB of data to the given file.
-`write_fsync` calls `fsync(fd)` before closing; `write_only` does not.
+- `just trace-write_fsync`
+  - Clears the trace buffer, starts tracing, runs `./write_fsync write_fsync.txt`, stops tracing.
+  - Saves output to `./trace_write_fsync.txt`.
 
----
+- `just trace-cat`
+  - Prints the current kernel trace buffer to the terminal.
 
-## Tracing with ftrace
-
-1. Prepare a clean buffer:
-
-   ```bash
-   sudo -s
-   cd /sys/kernel/debug/tracing
-   echo 0 > tracing_on
-   echo nop > current_tracer
-   : > trace
-   ```
-
-2. Choose the function-graph tracer and filter interesting functions:
-
-   ```bash
-   echo function_graph > current_tracer
-   echo __x64_sys_write     >  set_ftrace_filter
-   echo __x64_sys_fsync     >> set_ftrace_filter
-   echo vfs_fsync_range     >> set_ftrace_filter
-   echo ext4_sync_file      >> set_ftrace_filter   # or xfs_file_fsync, etc.
-   ```
-
-3. Run a program under trace:
-
-   ```bash
-   : > trace
-   echo 1 > tracing_on
-   ./write_fsync /tmp/test.bin
-   echo 0 > tracing_on
-   cat trace | less
-   ```
-
-   Compare the traces for `write_only` vs `write_fsync`.
-   You should see `__x64_sys_fsync → vfs_fsync_range → ext4_sync_file` in the latter.
-
-4. Don’t forget to disable tracing afterward:
-
-   ```bash
-   echo 0 > tracing_on
-   echo nop > current_tracer
-   : > trace
-   ```
+Note: These recipes operate on the live ftrace buffer and expect `sudo` access. Ensure tracefs is mounted (most distros mount it automatically under debugfs).
 
 ---
 
-## What to look for
+## Results (from this repo)
 
-* `write_only`: mostly `__x64_sys_write` calls, no explicit fsync path.
-* `write_fsync`: a call chain that includes `__x64_sys_fsync`, `vfs_fsync_range`, and your filesystem’s `*_sync_file` implementation.
+- `trace_write_only.txt` contains no fsync path — there is no `__x64_sys_fsync` captured because the program never calls `fsync`.
 
-For block-level evidence of flushes (`REQ_PREFLUSH`, `FUA`), add tracepoints with `trace-cmd` or `bpftrace`.
+- `trace_write_fsync.txt` shows the fsync syscall and VFS sync path, for example:
+
+  ```
+  # tracer: function_graph
+  # CPU  DURATION                  FUNCTION CALLS
+    1)               |  __x64_sys_fsync() {
+    1)               |    vfs_fsync_range() {
+    5) * 17318.74 us |    } /* vfs_fsync_range */
+    5) * 17322.31 us |  } /* __x64_sys_fsync */
+  ```
+
+This directly reflects the key finding: without an explicit `fsync(2)`, the syscall ftrace does not contain fsync; with `fsync(2)`, the trace captures `__x64_sys_fsync → vfs_fsync_range` along with timing.
+
+---
+
+## Tips
+
+- If you want to focus the trace, set the tracer and filters before running the `just` targets, e.g.:
+  - `echo function_graph | sudo tee /sys/kernel/debug/tracing/current_tracer`
+  - `echo __x64_sys_fsync | sudo tee /sys/kernel/debug/tracing/set_ftrace_filter`
+  - `echo vfs_fsync_range | sudo tee -a /sys/kernel/debug/tracing/set_ftrace_filter`
+- The exact filesystem-specific sync function (e.g., `ext4_sync_file`, `xfs_file_fsync`) may also appear depending on configuration and filters.
 
 ---
 
 ## Disclaimer
 
-This project is for **educational purposes**. It’s a minimal illustration of durability semantics in Linux filesystems. Actual behavior depends on your filesystem, mount options, and hardware write-back cache.
-
+Behavior can vary by filesystem, mount options, writeback settings, and hardware caches. This is a minimal educational example to contrast `write` vs `write+fsync` as observed by ftrace.
